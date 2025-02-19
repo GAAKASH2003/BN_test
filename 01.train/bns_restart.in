@@ -1,0 +1,104 @@
+clear
+# Setup file paths for Colab
+variable fld string colab_output
+shell mkdir -p /content/${fld}          # Create output directory
+variable sim string /content/${fld}
+
+# ------------------------ INITIALIZATION ----------------------------
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+timestep        0.0005
+variable T equal 300                    # Simulation temperature
+
+# ----------------------- ATOM DEFINITION ----------------------------
+# Check if a restart file exists
+variable restart_file_exists equal 0
+shell if [ -e ${sim}/restart.latest ]; then echo "1" > /content/restart_flag; else echo "0" > /content/restart_flag; fi
+variable restart_file_exists file /content/restart_flag
+
+if "${restart_file_exists} == 1" then &
+  "read_restart ${sim}/restart.latest" &
+else &
+  "read_data /content/conf1.lmp"       # Ensure conf1.lmp is in the Colab directory
+
+log ${sim}/log.lammps                   # Save log file to the output folder
+
+# ------------------------ FORCE FIELDS ------------------------------
+pair_style      deepmd /content/graph-compress.pb  # Path to DeepMD-kit model
+pair_coeff      * *
+
+######################################
+# EQUILIBRATION
+if "${restart_file_exists} == 0" then {
+    minimize 1.0e-10 1.0e-10 100000 100000  # Minimize energy
+
+    # Set thermo output
+    thermo 200
+    thermo_style custom step temp pe press pxx pyy pzz lx ly lz vol
+
+    velocity all create ${T} 48455         # Initialize velocities
+
+    reset_timestep 0
+
+    # Equilibrium pressure
+    dump eqlb1 all atom 500 ${sim}/NPT.lammpstrj
+    fix 1 all npt temp ${T} ${T} $(100*dt) aniso 0 0 $(1000*dt) drag 1
+    restart 100000 ${sim}/restart.*
+    run 100000                             # Run for 100,000 timesteps
+    write_restart ${sim}/restart.latest
+    undump eqlb1
+    unfix 1
+
+    print "Equilibration done"
+
+    # Store initial cell length for strain calculations
+    variable tmp equal "ly"
+    variable L0 equal ${tmp}
+    print "Initial Length, L0: ${L0}"
+}
+
+######################################
+
+# DEFORMATION
+
+reset_timestep 0
+
+compute 1 all stress/atom NULL
+compute 2 all reduce sum c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+
+variable srate equal 1.0e9
+variable srate1 equal "v_srate / 1.0e12"
+
+fix 1 all npt temp ${T} ${T} $(100*dt) x 0 0 $(1000*dt) z 0 0 $(1000*dt) drag 1
+fix 2 all deform 1 y erate ${srate1} units box remap x
+
+# Output strain and stress info to file
+variable strain equal "(ly - v_L0)/v_L0"
+variable p1 equal "v_strain"
+
+variable p2 equal "-pxx/10000"
+variable p3 equal "-pyy/10000"
+variable p4 equal "-pzz/10000"
+
+fix def1 all print 100 "${p1} ${p2} ${p3} ${p4} $(pe)" file ${sim}/Stress_Strain.txt screen no
+
+dump 1 all custom 1000 ${sim}/tensile.lammpstrj id type x y z c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+dump_modify 1 sort id
+
+# Display thermo
+thermo  200
+thermo_style custom step temp v_p1 v_p2 v_p3 v_p4 ke pe press
+
+restart 100000 ${sim}/restart.*
+run     500000                          # Run for 500,000 timesteps
+write_restart ${sim}/restart.latest
+
+unfix 1
+undump 1
+
+######################################
+
+# SIMULATION DONE
+print "All done"

@@ -1,0 +1,96 @@
+clear
+#processors 2 2 2
+#timer timeout 0 every 1              # skip run check your code before run # 
+    
+shell mkdir output/${fld}
+variable sim string output/${fld}
+
+# ------------------------ INITIALIZATION ----------------------------
+units 		metal
+dimension	3
+boundary	p	p	p
+atom_style	atomic
+timestep        0.0005
+variable T equal 300
+
+# ----------------------- ATOM DEFINITION ----------------------------
+read_data conf1.lmp
+log ${sim}/log.lammps
+
+# ------------------------ FORCE FIELDS ------------------------------
+
+pair_style	deepmd graph-compress.pb
+pair_coeff	* *
+
+######################################
+# EQUILIBRATION
+
+minimize 1.0e-10 1.0e-10 100000 100000
+
+# Set thermo output
+thermo 200
+thermo_style custom step temp pe press pxx pyy pzz lx ly lz vol
+
+velocity all create ${T} 48455
+
+reset_timestep	0
+
+# Equilibrium pressure
+dump eqlb1 all atom 500 ${sim}/NPT.lammpstrj
+fix 1 all npt temp ${T} ${T} $(100*dt) aniso 0 0 $(1000*dt) drag 1
+run 100000
+undump eqlb1
+unfix 1
+
+print "Equilibration done"
+
+# Store initial cell length for strain calculations
+
+variable tmp equal "ly"
+variable L0 equal ${tmp}
+print "Initial Length, L0: ${L0}"
+
+######################################
+
+# DEFORMATION
+
+reset_timestep	0
+
+compute 1 all stress/atom NULL
+compute 2 all reduce sum c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+
+variable srate equal 1.0e9
+variable srate1 equal "v_srate / 1.0e12"
+
+fix 1 all npt temp ${T} ${T} $(100*dt) x 0 0 $(1000*dt) z 0 0 $(1000*dt) drag 1
+fix 2 all deform 1 y erate ${srate1} units box remap x
+
+# Output strain and stress info to file
+# for units metal, pressure is in [bars] = 100 [kPa] = 1/10000 [GPa]
+# p2, p3, p4 are in GPa
+
+variable strain equal "(ly - v_L0)/v_L0"
+variable p1 equal "v_strain"
+
+variable p2 equal "-pxx/10000"
+variable p3 equal "-pyy/10000"
+variable p4 equal "-pzz/10000"
+
+fix def1 all print 100 "${p1} ${p2} ${p3} ${p4} $(pe)" file ${sim}/Stress_Strain.txt screen no
+
+dump 1 all custom 1000 ${sim}/tensile.lammpstrj id type x y z c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+dump_modify 1 sort id
+
+# Display thermo
+thermo 	200
+thermo_style	custom step temp v_p1 v_p2 v_p3 v_p4 ke pe press
+
+run		500000
+unfix 1
+undump 1
+
+######################################
+
+# SIMULATION DONE
+print "All done"
+
