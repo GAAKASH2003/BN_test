@@ -1,0 +1,98 @@
+# ---------------------- SETUP -------------------------
+clear
+
+# Set TensorFlow threading options
+# (Optional, if using TensorFlow-based DPMD)
+
+# Define output folder
+variable fld string "simulation_test"
+shell mkdir -p output/${fld}
+variable sim string output/${fld}
+
+# --------------------- INITIALIZATION ------------------
+units       metal
+dimension   3
+boundary    p p p
+atom_style  atomic
+timestep    0.0005
+variable T equal 300
+
+# -------------------- ATOM DEFINITION ------------------
+read_data conf1.lmp
+log ${sim}/log.lammps
+
+# --------------------- FORCE FIELDS --------------------
+pair_style  deepmd graph-compress.pb
+pair_coeff  * *
+
+######################################
+# EQUILIBRATION
+
+minimize 1.0e-10 1.0e-10 100000 100000  # Energy minimization
+
+# Set thermo output
+thermo 200
+thermo_style custom step temp pe press pxx pyy pzz lx ly lz vol
+
+velocity all create ${T} 48455
+
+reset_timestep 0
+
+# Equilibrium pressure
+dump eqlb1 all atom 1000 ${sim}/NPT.lammpstrj  # Output for visualization
+fix 1 all npt temp ${T} ${T} $(100*dt) aniso 0 0 $(1000*dt) drag 1
+run 100000
+undump eqlb1
+unfix 1
+
+print "Equilibration done"
+
+# Store initial cell length for strain calculations
+variable tmp equal "ly"
+variable L0 equal ${tmp}
+print "Initial Length, L0: ${L0}"
+
+######################################
+# DEFORMATION
+
+reset_timestep 0
+
+# Stress calculation with normalization
+compute 1 all centroid/stress/atom NULL
+compute 2 all reduce sum c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+
+# Normalized stress components in GPa
+variable stress_xx equal "-c_2[1]/vol/10000"
+variable stress_yy equal "-c_2[2]/vol/10000"
+variable stress_zz equal "-c_2[3]/vol/10000"
+
+# Higher strain rate for better hardening behavior
+variable srate equal 1.0e10
+variable srate1 equal "v_srate / 1.0e12"
+
+fix 1 all npt temp ${T} ${T} $(100*dt) x 0 0 $(1000*dt) z 0 0 $(1000*dt) drag 1
+fix 2 all deform 1 y erate ${srate1} units box remap x
+
+# Output strain and stress info for graphing
+variable strain equal "(ly - v_L0)/v_L0"
+variable p1 equal "v_strain"
+
+fix def1 all print 10 "${p1} ${stress_xx} ${stress_yy} ${stress_zz} $(pe)" file ${sim}/Stress_Strain.txt screen no
+
+# Dump configuration for visualization
+dump 1 all custom 1000 ${sim}/tensile.lammpstrj id type x y z c_1[1] c_1[2] c_1[3] c_1[4] c_1[5] c_1[6]
+dump_modify 1 sort id
+
+# Detailed thermo output for monitoring
+thermo 100
+thermo_style custom step temp v_strain v_stress_xx v_stress_yy v_stress_zz ke pe press
+
+# Longer run for capturing breaking point
+run 1000000
+unfix 1
+undump 1
+
+######################################
+
+# SIMULATION DONE
+print "All done"
